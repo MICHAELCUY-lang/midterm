@@ -1,128 +1,132 @@
 <?php
+require_once '../config/db.php';
+require_once '../includes/functions.php';
+
 // Start session
-session_start();
+ensure_session_started();
 
 // Check if user is logged in
-if (!isset($_SESSION['user_id'])) {
-    header('Location: login.php');
-    exit();
+if (!is_logged_in()) {
+    header("Location: ../auth/login.php");
+    exit;
 }
 
-// Include database connection
-require_once 'config/db.php';
+// Get user ID from session
+$user_id = $_SESSION['user_id'];
 
-// Define variables and set to empty values
-$title = $content = '';
-$titleErr = $contentErr = '';
-$is_public = 0;
-
-// Generate CSRF token if not already set
-if (!isset($_SESSION['csrf_token'])) {
-    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-}
-
-// Process form data when form is submitted
+// Process form submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    // Validate CSRF token
-    if (!isset($_POST['csrf_token']) || $_POST['csrf_token'] !== $_SESSION['csrf_token']) {
-        die('CSRF token validation failed');
-    }
+    $content = isset($_POST['content']) ? clean_input($_POST['content']) : '';
+    $media_type = 'none';
+    $media_url = '';
+    $errors = [];
     
-    // Validate title
-    if (empty($_POST['title'])) {
-        $titleErr = 'Title is required';
-    } else {
-        $title = trim($_POST['title']);
-        // Check if title is too long
-        if (strlen($title) > 255) {
-            $titleErr = 'Title must be less than 255 characters';
+    // Check if posting as anonymous
+    $post_as_anonymous = isset($_POST['post_as_anonymous']) && $_POST['post_as_anonymous'] == '1';
+    
+    // If posting as anonymous, get the anonymous user ID
+    if ($post_as_anonymous) {
+        $stmt = $pdo->query("SELECT user_id FROM users WHERE is_anonymous = TRUE LIMIT 1");
+        $anonymous_user = $stmt->fetch();
+        
+        if ($anonymous_user) {
+            $user_id = $anonymous_user['user_id'];
+            error_log("Posting as anonymous user. User ID: " . $user_id);
+        } else {
+            error_log("Anonymous user not found. Using regular user.");
         }
     }
-    
+
     // Validate content
-    if (empty($_POST['content'])) {
-        $contentErr = 'Content is required';
-    } else {
-        $content = trim($_POST['content']);
+    if (empty($content)) {
+        $errors[] = "Konten tidak boleh kosong";
+    } elseif (strlen($content) > 500) {
+        $errors[] = "Konten maksimal 500 karakter";
     }
+
+    // Debug logging
+    error_log("=== Processing post creation ===");
+    error_log("User ID: " . $user_id);
+    error_log("Content length: " . strlen($content));
+    error_log("Posting as anonymous: " . ($post_as_anonymous ? 'YES' : 'NO'));
     
-    // Check if public checkbox is set
-    $is_public = isset($_POST['is_public']) ? 1 : 0;
+    // Check file uploads
+    $has_photo = isset($_FILES['photo']) && $_FILES['photo']['error'] !== UPLOAD_ERR_NO_FILE;
+    $has_video = isset($_FILES['video']) && $_FILES['video']['error'] !== UPLOAD_ERR_NO_FILE;
     
-    // If no errors, insert data into database
-    if (empty($titleErr) && empty($contentErr)) {
-        try {
-            $stmt = $pdo->prepare("INSERT INTO community_notes (user_id, title, content, is_public) 
-                                   VALUES (:user_id, :title, :content, :is_public)");
-            
-            $stmt->bindParam(':user_id', $_SESSION['user_id'], PDO::PARAM_INT);
-            $stmt->bindParam(':title', $title, PDO::PARAM_STR);
-            $stmt->bindParam(':content', $content, PDO::PARAM_STR);
-            $stmt->bindParam(':is_public', $is_public, PDO::PARAM_INT);
-            
-            $stmt->execute();
-            
-            // Redirect to view page after successful insertion
-            header('Location: view.php');
-            exit();
-        } catch(PDOException $e) {
-            die("ERROR: Could not insert data. " . $e->getMessage());
+    error_log("Has photo upload: " . ($has_photo ? 'YES' : 'NO'));
+    error_log("Has video upload: " . ($has_video ? 'YES' : 'NO'));
+    
+    if ($has_photo && $has_video) {
+        $errors[] = "Anda hanya dapat mengunggah foto atau video, tidak keduanya";
+        error_log("ERROR: Both photo and video uploaded");
+    }
+
+    // Check if photo is uploaded
+    if ($has_photo) {
+        error_log("Processing photo upload");
+        $media_type = 'photo';
+        $upload_result = upload_media($_FILES['photo'], 'photo');
+        
+        if (!$upload_result['success']) {
+            $errors[] = $upload_result['message'];
+            error_log("Photo upload failed: " . $upload_result['message']);
+        } else {
+            $media_url = $upload_result['file_path'];
+            error_log("Photo upload successful: " . $media_url);
         }
     }
+    // Check if video is uploaded
+    elseif ($has_video) {
+        error_log("Processing video upload");
+        $media_type = 'video';
+        $upload_result = upload_media($_FILES['video'], 'video');
+        
+        if (!$upload_result['success']) {
+            $errors[] = $upload_result['message'];
+            error_log("Video upload failed: " . $upload_result['message']);
+        } else {
+            $media_url = $upload_result['file_path'];
+            error_log("Video upload successful: " . $media_url);
+        }
+    }
+
+    // If no errors, insert post into database
+    if (empty($errors)) {
+        try {
+            error_log("Inserting post into database");
+            error_log("Media type: " . $media_type);
+            error_log("Media URL: " . $media_url);
+            
+            $stmt = $pdo->prepare("
+                INSERT INTO posts (user_id, content, media_type, media_url) 
+                VALUES (?, ?, ?, ?)
+            ");
+            $stmt->execute([$user_id, $content, $media_type, $media_url]);
+            
+            $post_id = $pdo->lastInsertId();
+            error_log("Post created successfully with ID: " . $post_id);
+            
+            // Redirect to home page
+            header("Location: ../index.php");
+            exit;
+        } catch (PDOException $e) {
+            error_log("Database error: " . $e->getMessage());
+            $errors[] = "Terjadi kesalahan. Silakan coba lagi.";
+        }
+    }
+
+    // If there are errors, store in session and redirect back
+    if (!empty($errors)) {
+        error_log("Errors found: " . json_encode($errors));
+        $_SESSION['post_errors'] = $errors;
+        $_SESSION['post_content'] = $content; // Save content for re-population
+        header("Location: ../index.php");
+        exit;
+    }
+} else {
+    // If not POST request, redirect to home
+    header("Location: ../index.php");
+    exit;
 }
 ?>
-
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Create Note</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body>
-    <div class="container mt-5">
-        <div class="row">
-            <div class="col-md-8 offset-md-2">
-                <div class="card">
-                    <div class="card-header">
-                        <h2>Create New Note</h2>
-                    </div>
-                    <div class="card-body">
-                        <form method="post" action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>">
-                            <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['csrf_token']; ?>">
-                            
-                            <div class="mb-3">
-                                <label for="title" class="form-label">Title</label>
-                                <input type="text" class="form-control <?php echo (!empty($titleErr)) ? 'is-invalid' : ''; ?>" 
-                                       id="title" name="title" value="<?php echo htmlspecialchars($title); ?>">
-                                <span class="invalid-feedback"><?php echo $titleErr; ?></span>
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label for="content" class="form-label">Content</label>
-                                <textarea class="form-control <?php echo (!empty($contentErr)) ? 'is-invalid' : ''; ?>" 
-                                          id="content" name="content" rows="6"><?php echo htmlspecialchars($content); ?></textarea>
-                                <span class="invalid-feedback"><?php echo $contentErr; ?></span>
-                            </div>
-                            
-                            <div class="mb-3 form-check">
-                                <input type="checkbox" class="form-check-input" id="is_public" name="is_public" 
-                                       value="1" <?php echo $is_public ? 'checked' : ''; ?>>
-                                <label class="form-check-label" for="is_public">Make note public</label>
-                            </div>
-                            
-                            <div class="d-flex justify-content-between">
-                                <button type="submit" class="btn btn-primary">Save Note</button>
-                                <a href="view.php" class="btn btn-secondary">Cancel</a>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-</body>
-</html>

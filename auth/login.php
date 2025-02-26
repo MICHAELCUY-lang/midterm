@@ -7,7 +7,7 @@ ensure_session_started();
 
 // Redirect if already logged in
 if (is_logged_in()) {
-    header("Location: ../index.php");
+    header("Location: auth/index.php");
     exit;
 }
 

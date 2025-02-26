@@ -1,163 +1,210 @@
 <?php
+require_once '../config/db.php';
+require_once '../includes/functions.php';
+
 // Start session
-session_start();
+ensure_session_started();
 
 // Check if user is logged in
-if (!isset($_SESSION['user_id'])) {
-    header('Location: login.php');
-    exit();
+if (!is_logged_in()) {
+    header("Location: ../auth/login.php");
+    exit;
 }
 
-// Include database connection
-require_once 'config/db.php';
-
-// Check if ID is provided
+// Check if post ID is provided
 if (!isset($_GET['id']) || !is_numeric($_GET['id'])) {
-    header('Location: view.php');
-    exit();
+    header("Location: ../index.php");
+    exit;
 }
 
-$note_id = intval($_GET['id']);
+$post_id = intval($_GET['id']);
+$user_id = $_SESSION['user_id'];
+$errors = [];
 
-// Generate CSRF token if not already set
-if (!isset($_SESSION['csrf_token'])) {
-    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-}
-
-// Define variables
-$title = $content = '';
-$titleErr = $contentErr = '';
-$is_public = 0;
-$note = null;
-
-// Get note data and check if user is the owner
+// Get post data
 try {
-    $stmt = $pdo->prepare("SELECT * FROM community_notes WHERE id = :id AND user_id = :user_id");
-    $stmt->bindParam(':id', $note_id, PDO::PARAM_INT);
-    $stmt->bindParam(':user_id', $_SESSION['user_id'], PDO::PARAM_INT);
-    $stmt->execute();
-    $note = $stmt->fetch();
+    $stmt = $pdo->prepare("
+        SELECT p.*, u.username, u.profile_picture, u.is_anonymous
+        FROM posts p
+        JOIN users u ON p.user_id = u.user_id
+        WHERE p.post_id = ? AND p.user_id = ?
+    ");
+    $stmt->execute([$post_id, $user_id]);
+    $post = $stmt->fetch();
     
-    if (!$note) {
-        // Note doesn't exist or doesn't belong to the user
-        header('Location: view.php');
-        exit();
+    if (!$post) {
+        // Post not found or doesn't belong to the user
+        $_SESSION['error'] = "Post tidak ditemukan atau Anda tidak memiliki izin untuk mengeditnya";
+        header("Location: ../index.php");
+        exit;
     }
-    
-    // Populate form fields with existing data (if not a POST request)
-    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-        $title = $note['title'];
-        $content = $note['content'];
-        $is_public = $note['is_public'];
-    }
-} catch(PDOException $e) {
-    die("ERROR: Could not fetch note details. " . $e->getMessage());
+} catch (PDOException $e) {
+    $_SESSION['error'] = "Terjadi kesalahan. Silakan coba lagi.";
+    header("Location: ../index.php");
+    exit;
 }
 
-// Process form data when form is submitted
+// Process form submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    // Validate CSRF token
-    if (!isset($_POST['csrf_token']) || $_POST['csrf_token'] !== $_SESSION['csrf_token']) {
-        die('CSRF token validation failed');
-    }
-    
-    // Validate title
-    if (empty($_POST['title'])) {
-        $titleErr = 'Title is required';
-    } else {
-        $title = trim($_POST['title']);
-        // Check if title is too long
-        if (strlen($title) > 255) {
-            $titleErr = 'Title must be less than 255 characters';
-        }
-    }
+    $content = isset($_POST['content']) ? clean_input($_POST['content']) : '';
+    $media_type = $post['media_type'];
+    $media_url = $post['media_url'];
+    $remove_media = isset($_POST['remove_media']) ? true : false;
     
     // Validate content
-    if (empty($_POST['content'])) {
-        $contentErr = 'Content is required';
-    } else {
-        $content = trim($_POST['content']);
+    if (empty($content)) {
+        $errors[] = "Konten tidak boleh kosong";
+    } elseif (strlen($content) > 500) {
+        $errors[] = "Konten maksimal 500 karakter";
     }
     
-    // Check if public checkbox is set
-    $is_public = isset($_POST['is_public']) ? 1 : 0;
+    // Handle media removal
+    if ($remove_media && !empty($post['media_url'])) {
+        $file_path = '../' . $post['media_url']; // Add the relative path prefix
+        if (file_exists($file_path)) {
+            unlink($file_path);
+        }
+        $media_type = 'none';
+        $media_url = '';
+    }
+    // Handle media update
+    elseif (!$remove_media) {
+        // Check if new photo is uploaded
+        if (isset($_FILES['photo']) && $_FILES['photo']['error'] !== UPLOAD_ERR_NO_FILE) {
+            // Delete old media if exists
+            if (!empty($post['media_url'])) {
+                $file_path = '../' . $post['media_url'];
+                if (file_exists($file_path)) {
+                    unlink($file_path);
+                }
+            }
+            
+            $media_type = 'photo';
+            $upload_result = upload_media($_FILES['photo'], 'photo');
+            
+            if (!$upload_result['success']) {
+                $errors[] = $upload_result['message'];
+            } else {
+                $media_url = $upload_result['file_path'];
+            }
+        }
+        // Check if new video is uploaded
+        elseif (isset($_FILES['video']) && $_FILES['video']['error'] !== UPLOAD_ERR_NO_FILE) {
+            // Delete old media if exists
+            if (!empty($post['media_url'])) {
+                $file_path = '../' . $post['media_url'];
+                if (file_exists($file_path)) {
+                    unlink($file_path);
+                }
+            }
+            
+            $media_type = 'video';
+            $upload_result = upload_media($_FILES['video'], 'video');
+            
+            if (!$upload_result['success']) {
+                $errors[] = $upload_result['message'];
+            } else {
+                $media_url = $upload_result['file_path'];
+            }
+        }
+    }
     
-    // If no errors, update the note
-    if (empty($titleErr) && empty($contentErr)) {
+    // If no errors, update post in database
+    if (empty($errors)) {
         try {
-            $stmt = $pdo->prepare("UPDATE community_notes 
-                                  SET title = :title, content = :content, is_public = :is_public 
-                                  WHERE id = :id AND user_id = :user_id");
+            $stmt = $pdo->prepare("
+                UPDATE posts 
+                SET content = ?, media_type = ?, media_url = ? 
+                WHERE post_id = ? AND user_id = ?
+            ");
+            $stmt->execute([$content, $media_type, $media_url, $post_id, $user_id]);
             
-            $stmt->bindParam(':title', $title, PDO::PARAM_STR);
-            $stmt->bindParam(':content', $content, PDO::PARAM_STR);
-            $stmt->bindParam(':is_public', $is_public, PDO::PARAM_INT);
-            $stmt->bindParam(':id', $note_id, PDO::PARAM_INT);
-            $stmt->bindParam(':user_id', $_SESSION['user_id'], PDO::PARAM_INT);
-            
-            $stmt->execute();
-            
-            // Redirect to the view page after successful update
-            header('Location: view.php?id=' . $note_id);
-            exit();
-        } catch(PDOException $e) {
-            die("ERROR: Could not update note. " . $e->getMessage());
+            // Redirect to home page
+            $_SESSION['success'] = "Post berhasil diperbarui";
+            header("Location: ../index.php");
+            exit;
+        } catch (PDOException $e) {
+            $errors[] = "Terjadi kesalahan. Silakan coba lagi.";
         }
     }
 }
+
+include '../includes/header.php';
 ?>
 
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Edit Note</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body>
-    <div class="container mt-5">
-        <div class="row">
-            <div class="col-md-8 offset-md-2">
-                <div class="card">
-                    <div class="card-header">
-                        <h2>Edit Note</h2>
+<div class="row justify-content-center">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header">
+                <h4>Edit Post</h4>
+            </div>
+            <div class="card-body">
+                <?php if (!empty($errors)): ?>
+                    <div class="alert alert-danger">
+                        <ul class="mb-0">
+                            <?php foreach ($errors as $error): ?>
+                                <li><?php echo $error; ?></li>
+                            <?php endforeach; ?>
+                        </ul>
                     </div>
-                    <div class="card-body">
-                        <form method="post" action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>?id=<?php echo $note_id; ?>">
-                            <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['csrf_token']; ?>">
-                            
-                            <div class="mb-3">
-                                <label for="title" class="form-label">Title</label>
-                                <input type="text" class="form-control <?php echo (!empty($titleErr)) ? 'is-invalid' : ''; ?>" 
-                                       id="title" name="title" value="<?php echo htmlspecialchars($title); ?>">
-                                <span class="invalid-feedback"><?php echo $titleErr; ?></span>
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label for="content" class="form-label">Content</label>
-                                <textarea class="form-control <?php echo (!empty($contentErr)) ? 'is-invalid' : ''; ?>" 
-                                          id="content" name="content" rows="6"><?php echo htmlspecialchars($content); ?></textarea>
-                                <span class="invalid-feedback"><?php echo $contentErr; ?></span>
-                            </div>
-                            
-                            <div class="mb-3 form-check">
-                                <input type="checkbox" class="form-check-input" id="is_public" name="is_public" 
-                                       value="1" <?php echo $is_public ? 'checked' : ''; ?>>
-                                <label class="form-check-label" for="is_public">Make note public</label>
-                            </div>
-                            
-                            <div class="d-flex justify-content-between">
-                                <button type="submit" class="btn btn-primary">Update Note</button>
-                                <a href="view.php?id=<?php echo $note_id; ?>" class="btn btn-secondary">Cancel</a>
-                            </div>
-                        </form>
+                <?php endif; ?>
+                
+                <form action="edit.php?id=<?php echo $post_id; ?>" method="post" enctype="multipart/form-data">
+                    <div class="mb-3">
+                        <label for="content" class="form-label">Konten</label>
+                        <textarea name="content" id="content" class="form-control count-chars" 
+                                  rows="4" maxlength="500" data-counter="char-counter"><?php echo htmlspecialchars($post['content']); ?></textarea>
+                        <small id="char-counter" class="text-muted"><?php echo 500 - strlen($post['content']); ?> karakter tersisa</small>
                     </div>
-                </div>
+                    
+                    <?php if ($post['media_type'] != 'none' && !empty($post['media_url'])): ?>
+                        <div class="mb-3">
+                            <label class="form-label">Media Saat Ini</label>
+                            <div class="post-media">
+                                <?php if ($post['media_type'] == 'photo'): ?>
+                                    <img src="/ssipfix/<?php echo $post['media_url']; ?>" alt="Post media" class="img-fluid">
+                                <?php elseif ($post['media_type'] == 'video'): ?>
+                                    <video src="/ssipfix/<?php echo $post['media_url']; ?>" controls class="img-fluid"></video>
+                                <?php endif; ?>
+                            </div>
+                            <div class="form-check mt-2">
+                                <input class="form-check-input" type="checkbox" id="remove_media" name="remove_media">
+                                <label class="form-check-label" for="remove_media">
+                                    Hapus media ini
+                                </label>
+                            </div>
+                        </div>
+                    <?php endif; ?>
+                    
+                    <div class="mb-3">
+                        <label class="form-label">Update Media (Opsional)</label>
+                        <div class="media-upload-buttons">
+                            <label class="media-upload-btn">
+                                <i class="fas fa-image"></i> Foto
+                                <input type="file" name="photo" class="file-input" style="display: none;" accept="image/*">
+                            </label>
+                            <label class="media-upload-btn">
+                                <i class="fas fa-video"></i> Video
+                                <input type="file" name="video" class="file-input" style="display: none;" accept="video/*">
+                            </label>
+                        </div>
+                        
+                        <div class="media-preview mt-3" style="display: none;">
+                            <button type="button" class="remove-media-btn"><i class="fas fa-times"></i></button>
+                            <img class="media-preview-element" src="" alt="Preview">
+                        </div>
+                    </div>
+                    
+                    <div class="d-flex justify-content-between">
+                        <a href="../index.php" class="btn btn-secondary">Batal</a>
+                        <button type="submit" class="btn btn-primary">
+                            <i class="fas fa-save me-1"></i> Simpan Perubahan
+                        </button>
+                    </div>
+                </form>
             </div>
         </div>
     </div>
-    
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-</body>
-</html>
+</div>
+
+<?php include '../includes/footer.php'; ?>

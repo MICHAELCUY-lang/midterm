@@ -1,99 +1,98 @@
 <?php
+require_once '../config/db.php';
+require_once '../includes/functions.php';
+
 // Start session
-session_start();
+ensure_session_started();
 
 // Check if user is logged in
-if (!isset($_SESSION['user_id'])) {
-    header('Location: login.php');
-    exit();
+if (!is_logged_in()) {
+    header("Location: ../auth/login.php");
+    exit;
 }
 
-// Include database connection
-require_once 'config/db.php';
-
-// Check if ID is provided
+// Check if post ID is provided
 if (!isset($_GET['id']) || !is_numeric($_GET['id'])) {
-    header('Location: view.php');
-    exit();
+    header("Location: ../index.php");
+    exit;
 }
 
-$note_id = intval($_GET['id']);
+$post_id = intval($_GET['id']);
+$user_id = $_SESSION['user_id'];
 
-// Generate CSRF token if not already set
-if (!isset($_SESSION['csrf_token'])) {
-    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-}
-
-// Check if the note exists and belongs to the current user
 try {
-    $check_stmt = $pdo->prepare("SELECT id FROM community_notes WHERE id = :id AND user_id = :user_id");
-    $check_stmt->bindParam(':id', $note_id, PDO::PARAM_INT);
-    $check_stmt->bindParam(':user_id', $_SESSION['user_id'], PDO::PARAM_INT);
-    $check_stmt->execute();
+    // First check if post exists and belongs to the user
+    // For an admin, you might modify this to allow deletion of any post
+    $check_stmt = $pdo->prepare("SELECT media_type, media_url FROM posts WHERE post_id = ? AND user_id = ?");
+    $check_stmt->execute([$post_id, $user_id]);
+    $post = $check_stmt->fetch();
     
-    if ($check_stmt->rowCount() === 0) {
-        // Note doesn't exist or doesn't belong to the user
-        $_SESSION['error_message'] = "Note not found or you don't have permission to delete it.";
-        header('Location: view.php');
-        exit();
-    }
-} catch(PDOException $e) {
-    die("ERROR: Could not check note ownership. " . $e->getMessage());
-}
-
-// Process delete request
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    // Validate CSRF token
-    if (!isset($_POST['csrf_token']) || $_POST['csrf_token'] !== $_SESSION['csrf_token']) {
-        die('CSRF token validation failed');
+    if (!$post) {
+        // Post not found or doesn't belong to the user
+        if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest') {
+            // AJAX request
+            header('Content-Type: application/json');
+            echo json_encode(['success' => false, 'message' => 'Post tidak ditemukan atau Anda tidak memiliki izin untuk menghapusnya']);
+            exit;
+        } else {
+            $_SESSION['error'] = "Post tidak ditemukan atau Anda tidak memiliki izin untuk menghapusnya";
+            header("Location: ../index.php");
+            exit;
+        }
     }
     
-    try {
-        $stmt = $pdo->prepare("DELETE FROM community_notes WHERE id = :id AND user_id = :user_id");
-        $stmt->bindParam(':id', $note_id, PDO::PARAM_INT);
-        $stmt->bindParam(':user_id', $_SESSION['user_id'], PDO::PARAM_INT);
-        $stmt->execute();
-        
-        $_SESSION['success_message'] = "Note successfully deleted.";
-        header('Location: view.php');
-        exit();
-    } catch(PDOException $e) {
-        die("ERROR: Could not delete note. " . $e->getMessage());
+    // Begin transaction
+    $pdo->beginTransaction();
+    
+    // Delete all reactions associated with this post
+    $stmt = $pdo->prepare("DELETE FROM reactions WHERE post_id = ?");
+    $stmt->execute([$post_id]);
+    
+    // Delete all comments associated with this post
+    $stmt = $pdo->prepare("DELETE FROM comments WHERE post_id = ?");
+    $stmt->execute([$post_id]);
+    
+    // Delete the post
+    $stmt = $pdo->prepare("DELETE FROM posts WHERE post_id = ?");
+    $stmt->execute([$post_id]);
+    
+    // Delete associated media file if it exists
+    if ($post['media_type'] != 'none' && !empty($post['media_url'])) {
+        $file_path = '../' . $post['media_url']; // Add the relative path prefix
+        if (file_exists($file_path)) {
+            unlink($file_path);
+        }
+    }
+    
+    // Commit transaction
+    $pdo->commit();
+    
+    // Return success response
+    if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest') {
+        // AJAX request
+        header('Content-Type: application/json');
+        echo json_encode(['success' => true, 'message' => 'Post berhasil dihapus']);
+        exit;
+    } else {
+        $_SESSION['success'] = "Post berhasil dihapus";
+        header("Location: ../index.php");
+        exit;
+    }
+} catch (PDOException $e) {
+    // Rollback transaction on error
+    if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+    }
+    
+    if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest') {
+        // AJAX request
+        header('Content-Type: application/json');
+        echo json_encode(['success' => false, 'message' => 'Terjadi kesalahan saat menghapus post']);
+        exit;
+    } else {
+        $_SESSION['error'] = "Terjadi kesalahan saat menghapus post";
+        header("Location: ../index.php");
+        exit;
     }
 }
 ?>
-
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Delete Note</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body>
-    <div class="container mt-5">
-        <div class="row">
-            <div class="col-md-6 offset-md-3">
-                <div class="card">
-                    <div class="card-header bg-danger text-white">
-                        <h3>Delete Note</h3>
-                    </div>
-                    <div class="card-body">
-                        <p>Are you sure you want to delete this note? This action cannot be undone.</p>
-                        
-                        <form method="post" action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>?id=<?php echo $note_id; ?>">
-                            <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['csrf_token']; ?>">
-                            
-                            <div class="d-flex justify-content-between">
-                                <button type="submit" class="btn btn-danger">Yes, Delete Note</button>
-                                <a href="view.php" class="btn btn-secondary">Cancel</a>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <script src="https://cdn.jsdelivr.net/npm

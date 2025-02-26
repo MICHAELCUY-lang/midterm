@@ -1,241 +1,208 @@
 <?php
+require_once '../config/db.php';
+require_once '../includes/functions.php';
+
 // Start session
-session_start();
+ensure_session_started();
 
 // Check if user is logged in
-if (!isset($_SESSION['user_id'])) {
-    header('Location: login.php');
-    exit();
+if (!is_logged_in()) {
+    header("Location: ../auth/login.php");
+    exit;
 }
 
-// Include database connection
-require_once 'config/db.php';
-
-// Set up pagination variables
-$page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
-$per_page = 10; // Number of notes per page
-$offset = ($page - 1) * $per_page;
-
-// Handle search query
-$search = isset($_GET['search']) ? trim($_GET['search']) : '';
-$search_condition = '';
-$search_params = [];
-
-// Process search query
-if (!empty($search)) {
-    $search_condition = " AND (title LIKE :search OR content LIKE :search)";
-    $search_params[':search'] = "%{$search}%";
+// Check if post ID is provided
+if (!isset($_GET['id']) || !is_numeric($_GET['id'])) {
+    header("Location: ../index.php");
+    exit;
 }
 
-// Get notes with pagination and search
+$post_id = intval($_GET['id']);
+
+// Get post with user info
 try {
-    // Count total records for pagination
-    $count_stmt = $pdo->prepare("SELECT COUNT(*) FROM community_notes WHERE user_id = :user_id" . $search_condition);
-    $count_stmt->bindParam(':user_id', $_SESSION['user_id'], PDO::PARAM_INT);
+    $stmt = $pdo->prepare("
+        SELECT p.*, u.username, u.profile_picture, u.is_anonymous,
+               (SELECT COUNT(*) FROM comments WHERE post_id = p.post_id) as comment_count
+        FROM posts p
+        JOIN users u ON p.user_id = u.user_id
+        WHERE p.post_id = ?
+    ");
+    $stmt->execute([$post_id]);
+    $post = $stmt->fetch();
     
-    if (!empty($search_params)) {
-        foreach ($search_params as $key => $value) {
-            $count_stmt->bindValue($key, $value);
-        }
+    if (!$post) {
+        $_SESSION['error'] = "Post tidak ditemukan";
+        header("Location: ../index.php");
+        exit;
     }
     
-    $count_stmt->execute();
-    $total_records = $count_stmt->fetchColumn();
-    $total_pages = ceil($total_records / $per_page);
+    // Get comments for this post
+    $comments = get_comments($pdo, $post_id);
     
-    // Fetch notes
-    $stmt = $pdo->prepare("SELECT * FROM community_notes 
-                          WHERE user_id = :user_id" . $search_condition . " 
-                          ORDER BY created_at DESC 
-                          LIMIT :offset, :per_page");
-    
-    $stmt->bindParam(':user_id', $_SESSION['user_id'], PDO::PARAM_INT);
-    $stmt->bindParam(':offset', $offset, PDO::PARAM_INT);
-    $stmt->bindParam(':per_page', $per_page, PDO::PARAM_INT);
-    
-    if (!empty($search_params)) {
-        foreach ($search_params as $key => $value) {
-            $stmt->bindValue($key, $value);
-        }
+    // Get user reaction if logged in
+    $user_reaction = null;
+    if (is_logged_in()) {
+        $user_reaction = get_user_reaction($pdo, $_SESSION['user_id'], $post_id);
     }
-    
-    $stmt->execute();
-    $notes = $stmt->fetchAll();
-} catch(PDOException $e) {
-    die("ERROR: Could not fetch notes. " . $e->getMessage());
+} catch (PDOException $e) {
+    $_SESSION['error'] = "Terjadi kesalahan. Silakan coba lagi.";
+    header("Location: ../index.php");
+    exit;
 }
 
-// Handle single note view
-$single_note = null;
-if (isset($_GET['id']) && is_numeric($_GET['id'])) {
-    try {
-        $note_id = intval($_GET['id']);
-        $stmt = $pdo->prepare("SELECT * FROM community_notes 
-                              WHERE id = :id AND user_id = :user_id");
-        $stmt->bindParam(':id', $note_id, PDO::PARAM_INT);
-        $stmt->bindParam(':user_id', $_SESSION['user_id'], PDO::PARAM_INT);
-        $stmt->execute();
-        $single_note = $stmt->fetch();
-        
-        if (!$single_note) {
-            $error_message = "Note not found or you don't have permission to view it.";
-        }
-    } catch(PDOException $e) {
-        die("ERROR: Could not fetch note details. " . $e->getMessage());
-    }
-}
+include '../includes/header.php';
 ?>
 
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Community Notes</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body>
-    <div class="container mt-4">
-        <div class="row mb-4">
-            <div class="col-md-8">
-                <h1>Your Notes</h1>
-            </div>
-            <div class="col-md-4 text-end">
-                <a href="create.php" class="btn btn-primary">Create New Note</a>
-            </div>
-        </div>
-        
-        <!-- Search Form -->
-        <div class="row mb-4">
-            <div class="col-md-6 offset-md-3">
-                <form method="get" action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" class="d-flex">
-                    <input type="text" name="search" class="form-control me-2" placeholder="Search notes..." 
-                           value="<?php echo htmlspecialchars($search); ?>">
-                    <button type="submit" class="btn btn-outline-primary">Search</button>
-                    <?php if (!empty($search)): ?>
-                        <a href="view.php" class="btn btn-outline-secondary ms-2">Clear</a>
-                    <?php endif; ?>
-                </form>
-            </div>
-        </div>
-        
-        <div class="row">
-            <?php if (isset($single_note) && $single_note): ?>
-                <!-- Single Note View -->
-                <div class="col-md-8 offset-md-2">
-                    <div class="card mb-4">
-                        <div class="card-header d-flex justify-content-between align-items-center">
-                            <h2><?php echo htmlspecialchars($single_note['title']); ?></h2>
-                            <div>
-                                <a href="edit.php?id=<?php echo $single_note['id']; ?>" class="btn btn-sm btn-primary me-2">Edit</a>
-                                <a href="delete.php?id=<?php echo $single_note['id']; ?>" class="btn btn-sm btn-danger" 
-                                   onclick="return confirm('Are you sure you want to delete this note?');">Delete</a>
-                            </div>
+<div class="row justify-content-center">
+    <div class="col-md-8">
+        <div class="card post-card" id="post-<?php echo $post['post_id']; ?>">
+            <div class="card-header">
+                <div class="post-header">
+                    <?php if ($post['is_anonymous']): ?>
+                        <div class="anonymous-icon">
+                            <i class="fas fa-user-secret"></i>
                         </div>
-                        <div class="card-body">
-                            <div class="mb-3">
-                                <?php echo nl2br(htmlspecialchars($single_note['content'])); ?>
-                            </div>
-                            <div class="text-muted small">
-                                <div>Created: <?php echo date('F j, Y, g:i a', strtotime($single_note['created_at'])); ?></div>
-                                <?php if ($single_note['updated_at']): ?>
-                                    <div>Updated: <?php echo date('F j, Y, g:i a', strtotime($single_note['updated_at'])); ?></div>
-                                <?php endif; ?>
-                                <div>Status: <?php echo $single_note['is_public'] ? 'Public' : 'Private'; ?></div>
-                            </div>
-                        </div>
-                        <div class="card-footer">
-                            <a href="view.php" class="btn btn-secondary">Back to List</a>
-                        </div>
-                    </div>
-                </div>
-            <?php else: ?>
-                <!-- Notes List View -->
-                <div class="col-md-12">
-                    <?php if (isset($error_message)): ?>
-                        <div class="alert alert-danger"><?php echo $error_message; ?></div>
-                    <?php endif; ?>
-                    
-                    <?php if (empty($notes)): ?>
-                        <div class="alert alert-info">
-                            <?php echo empty($search) ? 'You have no notes yet.' : 'No notes found matching your search.'; ?>
+                        <div class="post-user-info">
+                            <h6 class="mb-0 anonymous-user">Anonymous</h6>
+                            <small class="text-muted-small"><?php echo format_date($post['created_at']); ?></small>
                         </div>
                     <?php else: ?>
-                        <div class="table-responsive">
-                            <table class="table table-striped table-hover">
-                                <thead>
-                                    <tr>
-                                        <th>Title</th>
-                                        <th>Created</th>
-                                        <th>Updated</th>
-                                        <th>Status</th>
-                                        <th>Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <?php foreach ($notes as $note): ?>
-                                        <tr>
-                                            <td>
-                                                <a href="view.php?id=<?php echo $note['id']; ?>">
-                                                    <?php echo htmlspecialchars($note['title']); ?>
-                                                </a>
-                                            </td>
-                                            <td><?php echo date('M j, Y', strtotime($note['created_at'])); ?></td>
-                                            <td>
-                                                <?php echo $note['updated_at'] ? date('M j, Y', strtotime($note['updated_at'])) : '-'; ?>
-                                            </td>
-                                            <td>
-                                                <span class="badge <?php echo $note['is_public'] ? 'bg-success' : 'bg-secondary'; ?>">
-                                                    <?php echo $note['is_public'] ? 'Public' : 'Private'; ?>
-                                                </span>
-                                            </td>
-                                            <td>
-                                                <a href="edit.php?id=<?php echo $note['id']; ?>" class="btn btn-sm btn-primary">Edit</a>
-                                                <a href="delete.php?id=<?php echo $note['id']; ?>" class="btn btn-sm btn-danger" 
-                                                   onclick="return confirm('Are you sure you want to delete this note?');">Delete</a>
-                                            </td>
-                                        </tr>
-                                    <?php endforeach; ?>
-                                </tbody>
-                            </table>
+                        <img src="/ssipfix/assets/images/<?php echo $post['profile_picture']; ?>" 
+                             class="avatar-md rounded-circle" alt="Profile">
+                        <div class="post-user-info">
+                            <h6 class="mb-0">
+                                <a href="/ssipfix/profile/index.php?id=<?php echo $post['user_id']; ?>" class="text-decoration-none">
+                                    <?php echo htmlspecialchars($post['username']); ?>
+                                </a>
+                            </h6>
+                            <small class="text-muted-small"><?php echo format_date($post['created_at']); ?></small>
                         </div>
-                        
-                        <!-- Pagination -->
-                        <?php if ($total_pages > 1): ?>
-                            <nav aria-label="Page navigation">
-                                <ul class="pagination justify-content-center">
-                                    <?php if ($page > 1): ?>
-                                        <li class="page-item">
-                                            <a class="page-link" href="?page=<?php echo $page - 1; ?><?php echo !empty($search) ? '&search=' . urlencode($search) : ''; ?>" aria-label="Previous">
-                                                <span aria-hidden="true">&laquo;</span>
-                                            </a>
-                                        </li>
-                                    <?php endif; ?>
-                                    
-                                    <?php for ($i = 1; $i <= $total_pages; $i++): ?>
-                                        <li class="page-item <?php echo $i == $page ? 'active' : ''; ?>">
-                                            <a class="page-link" href="?page=<?php echo $i; ?><?php echo !empty($search) ? '&search=' . urlencode($search) : ''; ?>">
-                                                <?php echo $i; ?>
-                                            </a>
-                                        </li>
-                                    <?php endfor; ?>
-                                    
-                                    <?php if ($page < $total_pages): ?>
-                                        <li class="page-item">
-                                            <a class="page-link" href="?page=<?php echo $page + 1; ?><?php echo !empty($search) ? '&search=' . urlencode($search) : ''; ?>" aria-label="Next">
-                                                <span aria-hidden="true">&raquo;</span>
-                                            </a>
-                                        </li>
-                                    <?php endif; ?>
-                                </ul>
-                            </nav>
-                        <?php endif; ?>
+                    <?php endif; ?>
+                    
+                    <?php if ($post['user_id'] == $_SESSION['user_id']): ?>
+                        <div class="ms-auto dropdown">
+                            <button class="btn btn-sm btn-link text-muted" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                                <i class="fas fa-ellipsis-v"></i>
+                            </button>
+                            <ul class="dropdown-menu dropdown-menu-end">
+                                <li>
+                                    <a class="dropdown-item" href="/ssipfix/posts/edit.php?id=<?php echo $post['post_id']; ?>">
+                                        <i class="fas fa-edit me-2"></i> Edit
+                                    </a>
+                                </li>
+                                <li>
+                                    <a class="dropdown-item text-danger" href="/ssipfix/posts/delete.php?id=<?php echo $post['post_id']; ?>" 
+                                       onclick="return confirm('Apakah Anda yakin ingin menghapus post ini?');">
+                                        <i class="fas fa-trash-alt me-2"></i> Hapus
+                                    </a>
+                                </li>
+                            </ul>
+                        </div>
                     <?php endif; ?>
                 </div>
-            <?php endif; ?>
+            </div>
+            <div class="card-body">
+                <div class="post-content">
+                    <p><?php echo nl2br(htmlspecialchars($post['content'])); ?></p>
+                </div>
+                
+                <?php if ($post['media_type'] == 'photo'): ?>
+                    <div class="post-media">
+                        <img src="/ssipfix/<?php echo $post['media_url']; ?>" alt="Post media" class="img-fluid">
+                    </div>
+                <?php elseif ($post['media_type'] == 'video'): ?>
+                    <div class="post-media">
+                        <video src="/ssipfix/<?php echo $post['media_url']; ?>" controls class="img-fluid"></video>
+                    </div>
+                <?php endif; ?>
+                
+                <div class="post-actions">
+                    <div>
+                        <button class="post-action-btn like-btn <?php echo $user_reaction == 'like' ? 'active-like' : ''; ?>" 
+                                data-post-id="<?php echo $post['post_id']; ?>">
+                            <i class="fas fa-thumbs-up"></i> <span class="like-count"><?php echo $post['likes']; ?></span>
+                        </button>
+                        <button class="post-action-btn dislike-btn <?php echo $user_reaction == 'dislike' ? 'active-dislike' : ''; ?>" 
+                                data-post-id="<?php echo $post['post_id']; ?>">
+                            <i class="fas fa-thumbs-down"></i> <span class="dislike-count"><?php echo $post['dislikes']; ?></span>
+                        </button>
+                    </div>
+                    <button class="post-action-btn" id="comment-count">
+                        <i class="fas fa-comment"></i> <?php echo $post['comment_count']; ?> Komentar
+                    </button>
+                </div>
+                
+                <!-- Comment Form -->
+                <div class="comment-form mt-3">
+                    <form action="/ssipfix/comments/add.php" method="post">
+                        <input type="hidden" name="post_id" value="<?php echo $post['post_id']; ?>">
+                        <div class="input-group">
+                            <input type="text" name="content" class="form-control count-chars" 
+                                   placeholder="Tulis komentar..." maxlength="200" data-counter="comment-counter">
+                            <button type="submit" class="btn btn-primary">
+                                <i class="fas fa-paper-plane"></i>
+                            </button>
+                        </div>
+                        <small id="comment-counter" class="text-muted">200 karakter tersisa</small>
+                    </form>
+                </div>
+                
+                <!-- Comments Section -->
+                <div class="comment-section mt-4">
+                    <h5 class="mb-3">Komentar (<?php echo count($comments); ?>)</h5>
+                    
+                    <?php if (count($comments) > 0): ?>
+                        <?php foreach ($comments as $comment): ?>
+                            <div class="comment">
+                                <div class="comment-header">
+                                    <?php if ($comment['is_anonymous']): ?>
+                                        <div class="anonymous-icon" style="width: 30px; height: 30px; font-size: 0.9rem;">
+                                            <i class="fas fa-user-secret"></i>
+                                        </div>
+                                        <div class="comment-user-info">
+                                            <h6 class="mb-0 anonymous-user" style="font-size: 0.9rem;">Anonymous</h6>
+                                            <small class="text-muted-small"><?php echo format_date($comment['created_at']); ?></small>
+                                        </div>
+                                    <?php else: ?>
+                                        <img src="/ssipfix/assets/images/<?php echo $comment['profile_picture']; ?>" 
+                                             class="avatar-sm rounded-circle" alt="Profile">
+                                        <div class="comment-user-info">
+                                            <h6 class="mb-0" style="font-size: 0.9rem;">
+                                                <a href="/ssipfix/profile/index.php?id=<?php echo $comment['user_id']; ?>" class="text-decoration-none">
+                                                    <?php echo htmlspecialchars($comment['username']); ?>
+                                                </a>
+                                            </h6>
+                                            <small class="text-muted-small"><?php echo format_date($comment['created_at']); ?></small>
+                                        </div>
+                                    <?php endif; ?>
+                                    
+                                    <?php if ($comment['user_id'] == $_SESSION['user_id']): ?>
+                                        <div class="ms-auto">
+                                            <a href="/ssipfix/comments/delete.php?id=<?php echo $comment['comment_id']; ?>" 
+                                               class="text-danger" onclick="return confirm('Hapus komentar ini?');">
+                                                <i class="fas fa-times"></i>
+                                            </a>
+                                        </div>
+                                    <?php endif; ?>
+                                </div>
+                                <div class="comment-content">
+                                    <p class="mb-0"><?php echo htmlspecialchars($comment['content']); ?></p>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                    <?php else: ?>
+                        <p class="text-center text-muted my-3">Belum ada komentar.</p>
+                    <?php endif; ?>
+                </div>
+            </div>
+            <div class="card-footer">
+                <a href="/ssipfix/index.php" class="btn btn-secondary">
+                    <i class="fas fa-arrow-left me-1"></i> Kembali
+                </a>
+            </div>
         </div>
     </div>
-    
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-</body>
-</html>
+</div>
+
+<?php include '../includes/footer.php'; ?>

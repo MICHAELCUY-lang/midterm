@@ -27,44 +27,112 @@ function get_user_info($pdo, $user_id) {
     return $stmt->fetch();
 }
 
-// Upload media function
+// Upload media function with improved error handling and logging
 function upload_media($file, $type) {
+    // Start logging information about the upload
+    error_log("=== Starting media upload process ===");
+    error_log("File details: " . json_encode([
+        'name' => $file['name'],
+        'type' => $file['type'],
+        'size' => $file['size'],
+        'tmp_name' => $file['tmp_name'],
+        'error' => $file['error']
+    ]));
+    error_log("Upload type: " . $type);
+    
+    // Define target directory
     $target_dir = "../assets/uploads/";
     $target_dir .= ($type == 'photo') ? "photos/" : "videos/";
+    error_log("Target directory: " . $target_dir);
     
     // Create directory if it doesn't exist
     if (!file_exists($target_dir)) {
-        mkdir($target_dir, 0777, true);
+        error_log("Directory doesn't exist, attempting to create: " . $target_dir);
+        if (!mkdir($target_dir, 0777, true)) {
+            error_log("ERROR: Failed to create directory");
+            return ['success' => false, 'message' => 'Tidak dapat membuat direktori upload'];
+        }
+        error_log("Directory created successfully");
     }
     
+    // Check if directory is writable
+    if (!is_writable($target_dir)) {
+        error_log("ERROR: Directory is not writable: " . $target_dir);
+        return ['success' => false, 'message' => 'Direktori upload tidak dapat ditulis'];
+    }
+    
+    // Check if file was actually uploaded
+    if ($file['error'] !== UPLOAD_ERR_OK) {
+        $upload_errors = [
+            UPLOAD_ERR_INI_SIZE => 'Ukuran file melebihi batas upload_max_filesize di php.ini',
+            UPLOAD_ERR_FORM_SIZE => 'Ukuran file melebihi batas MAX_FILE_SIZE yang ditentukan dalam form HTML',
+            UPLOAD_ERR_PARTIAL => 'File hanya terupload sebagian',
+            UPLOAD_ERR_NO_FILE => 'Tidak ada file yang diupload',
+            UPLOAD_ERR_NO_TMP_DIR => 'Direktori temporary tidak ditemukan',
+            UPLOAD_ERR_CANT_WRITE => 'Gagal menulis file ke disk',
+            UPLOAD_ERR_EXTENSION => 'Upload dihentikan oleh ekstensi PHP'
+        ];
+        
+        $error_message = isset($upload_errors[$file['error']]) 
+            ? $upload_errors[$file['error']] 
+            : 'Error upload tidak dikenal: ' . $file['error'];
+        
+        error_log("ERROR: " . $error_message);
+        return ['success' => false, 'message' => $error_message];
+    }
+    
+    // Get file extension and create new filename
     $file_extension = strtolower(pathinfo($file["name"], PATHINFO_EXTENSION));
     $new_filename = uniqid() . '.' . $file_extension;
     $target_file = $target_dir . $new_filename;
+    
+    error_log("File extension: " . $file_extension);
+    error_log("New filename: " . $new_filename);
+    error_log("Target file path: " . $target_file);
     
     // Check file type
     if ($type == 'photo') {
         $allowed_types = ['jpg', 'jpeg', 'png', 'gif'];
         if (!in_array($file_extension, $allowed_types)) {
+            error_log("ERROR: Invalid photo file type: " . $file_extension);
             return ['success' => false, 'message' => 'Hanya file JPG, JPEG, PNG & GIF yang diperbolehkan.'];
         }
     } else if ($type == 'video') {
         $allowed_types = ['mp4', 'webm', 'ogg'];
         if (!in_array($file_extension, $allowed_types)) {
+            error_log("ERROR: Invalid video file type: " . $file_extension);
             return ['success' => false, 'message' => 'Hanya file MP4, WEBM & OGG yang diperbolehkan.'];
         }
     }
     
-    // Check file size (limit to 5MB for photos, 20MB for videos)
-    $max_size = ($type == 'photo') ? 5 * 1024 * 1024 : 20 * 1024 * 1024;
-    if ($file["size"] > $max_size) {
-        $max_size_mb = $max_size / (1024 * 1024);
-        return ['success' => false, 'message' => "Ukuran file melebihi batas {$max_size_mb}MB."];
-    }
+    // Note: We've removed the file size check to allow unlimited file sizes
+    error_log("File size: " . $file["size"] . " bytes (no size limit enforced)");
     
     // Upload file
     if (move_uploaded_file($file["tmp_name"], $target_file)) {
-        return ['success' => true, 'file_path' => substr($target_file, 3)]; // Remove "../" from path
+        error_log("File successfully uploaded to: " . $target_file);
+        
+        // Verify the file was actually saved
+        if (file_exists($target_file)) {
+            error_log("File exists check: PASSED");
+            $file_size = filesize($target_file);
+            error_log("Saved file size: " . $file_size . " bytes");
+            
+            // Get file permissions
+            $perms = substr(sprintf('%o', fileperms($target_file)), -4);
+            error_log("File permissions: " . $perms);
+            
+            // Return file path without the "../"
+            $relative_path = 'assets/uploads/' . ($type == 'photo' ? 'photos/' : 'videos/') . $new_filename;
+            error_log("Returning relative path: " . $relative_path);
+            return ['success' => true, 'file_path' => $relative_path];
+        } else {
+            error_log("ERROR: File exists check FAILED. File was not saved properly.");
+            return ['success' => false, 'message' => 'File berhasil diupload tetapi tidak tersimpan dengan benar.'];
+        }
     } else {
+        $php_error = error_get_last();
+        error_log("ERROR: Failed to move uploaded file. PHP error: " . json_encode($php_error));
         return ['success' => false, 'message' => 'Terjadi kesalahan saat mengunggah file.'];
     }
 }

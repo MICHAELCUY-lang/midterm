@@ -32,38 +32,47 @@ $posts = $stmt->fetchAll();
 <div class="row">
     <div class="col-md-8">
         <!-- Create Post Card -->
-        <div class="card create-post-card">
-            <div class="card-body">
-                <form action="posts/create.php" method="post" enctype="multipart/form-data">
-                    <div class="mb-3">
-                        <textarea name="content" class="form-control create-post-input count-chars" 
-                                  placeholder="Apa yang Anda pikirkan?" rows="3" maxlength="500" data-counter="char-counter"></textarea>
-                        <small id="char-counter" class="text-muted">500 karakter tersisa</small>
-                    </div>
-                    
-                    <div class="media-preview" style="display: none;">
-                        <button type="button" class="remove-media-btn"><i class="fas fa-times"></i></button>
-                        <img class="media-preview-element" src="" alt="Preview">
-                    </div>
-                    
-                    <div class="d-flex justify-content-between align-items-center">
-                        <div class="media-upload-buttons">
-                            <label class="media-upload-btn">
-                                <i class="fas fa-image"></i> Foto
-                                <input type="file" name="photo" class="file-input" style="display: none;" accept="image/*">
-                            </label>
-                            <label class="media-upload-btn">
-                                <i class="fas fa-video"></i> Video
-                                <input type="file" name="video" class="file-input" style="display: none;" accept="video/*">
-                            </label>
-                        </div>
-                        <button type="submit" class="btn btn-primary">
-                            <i class="fas fa-paper-plane me-1"></i> Posting
-                        </button>
-                    </div>
-                </form>
+<div class="card create-post-card">
+    <div class="card-body">
+        <form action="posts/create.php" method="post" enctype="multipart/form-data">
+            <div class="mb-3">
+                <textarea name="content" class="form-control create-post-input count-chars" 
+                          placeholder="Apa yang Anda pikirkan?" rows="3" maxlength="500" data-counter="char-counter"></textarea>
+                <small id="char-counter" class="text-muted">500 karakter tersisa</small>
             </div>
-        </div>
+            
+            <div class="media-preview" style="display: none;">
+                <button type="button" class="remove-media-btn"><i class="fas fa-times"></i></button>
+                <img class="media-preview-element" src="" alt="Preview">
+            </div>
+            
+            <div class="d-flex justify-content-between align-items-center">
+                <div class="media-upload-buttons">
+                    <label class="media-upload-btn">
+                        <i class="fas fa-image"></i> Foto
+                        <input type="file" name="photo" class="file-input" style="display: none;" accept="image/*">
+                    </label>
+                    <label class="media-upload-btn">
+                        <i class="fas fa-video"></i> Video
+                        <input type="file" name="video" class="file-input" style="display: none;" accept="video/*">
+                    </label>
+                </div>
+                <div>
+                    <!-- Checkbox untuk post sebagai anonymous -->
+                    <div class="form-check form-check-inline me-2">
+                        <input class="form-check-input" type="checkbox" id="post_as_anonymous" name="post_as_anonymous" value="1">
+                        <label class="form-check-label" for="post_as_anonymous">
+                            <i class="fas fa-user-secret"></i> Posting sebagai Anonymous
+                        </label>
+                    </div>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-paper-plane me-1"></i> Posting
+                    </button>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>  
         
         <!-- Posts Feed -->
         <?php if (count($posts) > 0): ?>
@@ -133,20 +142,29 @@ $posts = $stmt->fetchAll();
                         </div>
                         
                         <!-- Comment Form -->
-                        <div class="comment-form mt-3" data-post-id="<?php echo $post['post_id']; ?>" style="display: none;">
-                            <form action="comments/add.php" method="post">
-                                <input type="hidden" name="post_id" value="<?php echo $post['post_id']; ?>">
-                                <div class="input-group">
-                                    <input type="text" name="content" class="form-control count-chars" 
-                                           placeholder="Tulis komentar..." maxlength="200" data-counter="comment-counter-<?php echo $post['post_id']; ?>">
-                                    <button type="submit" class="btn btn-primary">
-                                        <i class="fas fa-paper-plane"></i>
-                                    </button>
-                                </div>
-                                <small id="comment-counter-<?php echo $post['post_id']; ?>" class="text-muted">200 karakter tersisa</small>
-                            </form>
-                        </div>
-                        
+<div class="comment-form mt-3" data-post-id="<?php echo $post['post_id']; ?>" style="display: none;">
+    <form action="/ssipfix/comments/add.php" method="post">
+        <input type="hidden" name="post_id" value="<?php echo $post['post_id']; ?>">
+        <div class="input-group mb-2">
+            <input type="text" name="content" class="form-control count-chars" 
+                   placeholder="Tulis komentar..." maxlength="200" data-counter="comment-counter-<?php echo $post['post_id']; ?>">
+            <button type="submit" class="btn btn-primary">
+                <i class="fas fa-paper-plane"></i>
+            </button>
+        </div>
+        <div class="d-flex justify-content-between align-items-center">
+            <small id="comment-counter-<?php echo $post['post_id']; ?>" class="text-muted">200 karakter tersisa</small>
+            <!-- Checkbox untuk komentar sebagai anonymous -->
+            <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="comment_as_anonymous_<?php echo $post['post_id']; ?>" 
+                       name="comment_as_anonymous" value="1">
+                <label class="form-check-label" for="comment_as_anonymous_<?php echo $post['post_id']; ?>">
+                    <i class="fas fa-user-secret"></i> Komentari sebagai Anonymous
+                </label>
+            </div>
+        </div>
+    </form>
+</div>
                         <!-- Comments Section -->
                         <div class="comment-section" data-post-id="<?php echo $post['post_id']; ?>" style="display: none;">
                             <?php 
